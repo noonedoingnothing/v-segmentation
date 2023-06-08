@@ -1,9 +1,11 @@
 from stemseg.modeling.embedding_utils import add_spatiotemporal_offset, get_nb_embedding_dims, get_nb_free_dims
 from stemseg.modeling.common import UpsampleTrilinear3D, AtrousPyramid3D, get_temporal_scales, get_pooling_layer_creator
 from stemseg.utils.global_registry import GlobalRegistry
-
+from stemseg.modeling.PE import PositionEmbeddingSine
+from torch.nn import functional as F
 import torch
 import torch.nn as nn
+import fvcore.nn.weight_init as weight_init
 
 EMBEDDING_HEAD_REGISTRY = GlobalRegistry.get("EmbeddingHead")
 
@@ -94,7 +96,16 @@ class SqueezingExpandDecoder(nn.Module):
         if seediness_output:
             self.conv_seediness = nn.Conv3d(inter_channels[-1], 1, kernel_size=1, padding=0, bias=False)
             self.seediness_channels = 1
+        
 
+        if in_channels != embedding_output_size:
+            self.input_proj = nn.Conv2d(in_channels, embedding_output_size, kernel_size=1)
+            weight_init.c2_xavier_fill(self.input_proj)
+        else:
+            self.input_proj = nn.Sequential()
+
+        self.self_attn = nn.MultiheadAttention(embedding_output_size, 2, dropout = 0.1)
+        self.pe = PositionEmbeddingSine()
         self.tanh_activation = tanh_activation
         self.register_buffer("time_scale", torch.tensor(1.0, dtype=torch.float32))
 
@@ -131,8 +142,13 @@ class SqueezingExpandDecoder(nn.Module):
         embeddings = self.conv_embedding(x)
         if self.tanh_activation:
             embeddings = (embeddings * 0.25).tanh()
+        
 
-        embeddings = add_spatiotemporal_offset(embeddings, self.time_scale, self.embedding_dim_mode)
+        #mask = F.interpolate(mask[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+        q = k = self.pe(embeddings, None)
+        print(q, ' ...............................................')
+        embeddings_ = self.self_attn(q, k, value = embeddings, attn_mask = None, key_padding_mask = None)[0]
+        embeddings = add_spatiotemporal_offset(embeddings, self.time_scale, self.embedding_dim_mode) + embeddings_
 
         variances = self.conv_variance(x)
 
